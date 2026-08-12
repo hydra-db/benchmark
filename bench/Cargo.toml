@@ -1,0 +1,32 @@
+# The benchmark as its own crate.
+#
+# It used to live in the engine repo as examples/query_bench.rs and was run with
+# `cargo run --example`. The engine is dropping examples/, so the source is
+# vendored here and the engine is consumed as an ordinary git dependency.
+#
+# Nothing about the measurement changed: this is the same program, calling the
+# same public API, so results stay comparable across the move.
+[package]
+name = "hydradb-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "query-bench"
+path = "src/main.rs"
+
+[dependencies]
+# The engine, pinned by BENCH_ENGINE_REF at build time via a [patch] or by
+# editing rev below. opencypher is what the benchmark needs to plan queries.
+slatedb-graph-kernel = { git = "https://github.com/hydra-db/hydradb.git", branch = "main", features = ["opencypher"] }
+
+# The benchmark names slatedb::object_store::ObjectStore directly. Same git
+# source and rev as the engine's own dependency, so Cargo unifies them into one
+# copy rather than compiling two incompatible ObjectStore types.
+slatedb = { git = "https://github.com/usecortex/slatedb.git", rev = "c501471ea070498931f30611bfd1ad2773c3c367", default-features = false, features = ["aws", "foyer"] }
+
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[profile.release]
+debug = false

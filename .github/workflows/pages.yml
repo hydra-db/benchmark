@@ -1,0 +1,60 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail rather than publish a site with no data. An earlier version fell
+      # back to "site shell only", so a deploy from a commit that predated the
+      # dataset silently replaced a populated site with an empty one while the
+      # run still reported success. A missing dataset is a broken deploy, not a
+      # degraded one.
+      #
+      # The dataset lives under docs/ and is served directly, so nothing is
+      # copied into place — this step only verifies it is present and non-trivial.
+      - name: Verify the dataset is present
+        run: |
+          f=docs/data/minio.json
+          if [ ! -f "$f" ]; then
+            echo "::error::$f is missing at $GITHUB_SHA."
+            echo "Refusing to publish a site with no data. If this is an old"
+            echo "ref, redeploy from main instead."
+            exit 1
+          fi
+          python3 - "$f" <<'PY'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          n = {k: len(d.get(k, [])) for k in ("depth", "concurrency", "matrix", "writes")}
+          if not n["depth"] or not n["concurrency"] or not n["writes"]:
+              sys.exit(f"::error::dataset has empty series: {n}")
+          print(f"dataset ok: {n}")
+          PY
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+venv/
+.venv/
+# Raw harness output; docs/data/minio.json is the committed artefact.
+bench-results/
+*.log
+bench/target/
+bench/.cargo/
