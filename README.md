@@ -1,78 +1,113 @@
 # HydraDB Benchmark
 
-Performance results for [HydraDB](https://github.com/hydra-db/hydradb), an
-object-store-native graph database.
+Reproducible read and write benchmarks for
+[HydraDB](https://github.com/hydra-db/hydradb), a graph database that stores its
+data in object storage.
 
-**[hydra-db.github.io/benchmark](https://hydra-db.github.io/benchmark/)**
+### [See the results](https://hydra-db.github.io/benchmark/)
 
-## What is published
+Every number here comes from a script in this repo. Clone it, run one command,
+and you get the same dataset the site is built from.
 
-Read latency and throughput from `scripts/run-query-bench.sh`, run against MinIO
-in Docker on a single 15-core host. Synthetic layered graphs,
-fanout 50 to 10,000, traversal depth 1 to 20 hops, worker counts 1 to 32.
+## Results
 
-Write latency and throughput from `scripts/run-write-bench.sh`: `CREATE`, `MERGE`
-and `DELETE` through the same Cypher entry point on the same shard, so a write
-number and a read number are measured the same way.
+Traversal on a 200,000 edge graph, one query at a time. A `MATCH` of length
+`1..h` visits every path up to `h` hops.
 
-Measurement is **in-process** against the library, so no Bolt or network cost is
-included, and the object store is **local**, so a cache miss costs a fraction of
-a millisecond. These are engine numbers, not deployment numbers.
+| Depth | Hot | Cold |
+|---|---|---|
+| 1 hop | 912 us | 51 ms |
+| 5 hops | 3.2 ms | 55 ms |
+| 10 hops | 5.8 ms | 56 ms |
+| 20 hops | 11.1 ms | 63 ms |
 
-## Headline
+Writes, one writer, same graph. Each statement is durable when it returns,
+because it commits to object storage.
 
-Throughput at fanout 10,000 stops improving past 4 workers and holds near 152
-queries per second, while latency grows in step with worker count (11 ms, 24,
-49, 208) and CPU sits at 231% of 1,500% available. Twelve of fifteen cores idle
-means threads are blocked, not busy. Raising the GraphBLAS matrix cache from 1
-to 8 slots moved throughput by 4% either way, ruling that out as the cause.
+| Statement | p50 | Throughput |
+|---|---|---|
+| `CREATE` | 4.9 ms | 194 writes/sec |
+| `MERGE` | 4.7 ms | 220 writes/sec |
+| `DELETE` | 6.7 ms | 152 writes/sec |
 
-Writes show the same shape more starkly. Throughput does not move at all when
-writers are added, holding near 230 writes per second from 1 to 32 writers,
-while p50 rises in proportion to the writer count (4.9 ms, 17, 35, 138). That is
-a fully serialised commit path: the extra time is queueing, not work. A hundred
-times more data in the store costs about 12% more per write, so the price is the
-commit rather than the size of the graph.
+Fastest hot read measured: **408 us**. Peak read throughput: **16,805
+queries/sec** at 32 workers.
+
+Reads scale with workers up to a point and writes do not scale at all, because
+commits serialise. The [site](https://hydra-db.github.io/benchmark/) has the
+worker sweeps, and [METHODOLOGY.md](METHODOLOGY.md) explains what was measured
+and where the limits are.
+
+## Scope
+
+Read this before quoting anything above.
+
+The benchmark calls the engine **in process**, so there is no Bolt server,
+driver, or network between the client and the engine. Storage is **MinIO on the
+same machine**, so a cache miss costs a fraction of a millisecond. The same
+query against real S3 from a laptop took 27 seconds cold.
+
+These are engine numbers on one 15-core machine, not deployment numbers.
 
 ## Reproducing
 
 ```bash
-./scripts/setup-macos.sh        # toolchain, libcypher-parser, Docker (macOS)
-./scripts/collect-minio.sh      # clones the engine, runs every sweep, builds the dataset
+./scripts/setup-macos.sh      # toolchain, libcypher-parser, Docker (macOS only)
+./scripts/collect-minio.sh    # clones the engine, runs every sweep, builds the dataset
 ```
 
-That runs the read sweeps and the write sweep. Running only part of it produces
-a dataset with an empty series, and the page drops a section whose series is
-empty, so the deploy check refuses it.
+About 18 minutes. It needs Docker and a Rust toolchain, and starts its own
+throwaway MinIO container, so there is nothing to configure and no cloud account
+to connect. Output lands in `docs/data/minio.json`, which is the only file the
+site reads.
 
-The benchmark program is `bench/`, a Rust crate in this repo that consumes the
-engine as a git dependency. Nothing needs to be on disk beyond Docker and a Rust
-toolchain. `HYDRADB_SRC` builds against a local engine checkout instead.
+Worker and write sweeps are published as the median of four runs, because a
+single run of the same configuration varied by up to 53% on this hardware.
 
-The engine is consumed as a library, so nothing is taken from its `examples/` or
-`scripts/`. The revision used is recorded in the dataset as `meta.engine_rev`. It writes `docs/data/minio.json`, the only file the site reads.
-Commit that to publish.
+To measure a change before it is merged, point the harness at a local engine
+checkout:
+
+```bash
+HYDRADB_SRC=~/hydradb ./scripts/collect-minio.sh
+```
+
+The engine revision used is recorded in the dataset as `meta.engine_rev`, so any
+published figure can be traced back to the build that produced it.
 
 ## Layout
 
 | Path | |
 |---|---|
-| `docs/` | the published site, and `docs/data/minio.json` |
-| `bench/` | the benchmark itself, a Rust crate depending on the engine |
-| `scripts/run-query-bench.sh` | MinIO container, builds and runs `bench/` reads |
-| `scripts/run-write-bench.sh` | the same for Cypher writes, medians of repeats |
-| `scripts/collect-minio.sh` | every sweep, then builds the dataset |
+| `bench/` | the benchmark, a Rust crate that uses the engine as a library |
+| `scripts/collect-minio.sh` | runs every sweep, then builds the dataset |
+| `scripts/run-query-bench.sh` | the read sweep against a throwaway MinIO |
+| `scripts/run-write-bench.sh` | the write sweep, medians of repeated runs |
 | `scripts/build-dataset.py` | harness CSVs to the site's JSON |
-| `scripts/setup-macos.sh` | toolchain setup |
+| `docs/` | the published site and its data |
 
-`METHODOLOGY.md` records what these numbers do **not** support. Read it before
-quoting any of them.
+`bench/` depends on the engine as an ordinary git dependency and uses only its
+public API, so nothing is needed from the engine's own `examples/` or `scripts/`.
+
+## Contributing
+
+Useful contributions, roughly in order of value:
+
+- **Run it on other hardware.** Every number here is from one machine. Results
+  from a different core count or a remote object store would say more than
+  another sweep on this one.
+- **Add a workload.** The read and write sweeps live in `bench/src/main.rs` and
+  emit CSV that `scripts/build-dataset.py` turns into the site's dataset.
+- **Challenge the method.** If a number looks wrong, [METHODOLOGY.md](METHODOLOGY.md)
+  describes exactly how it was produced. Issues that point at a measurement
+  error are welcome.
+
+Please include the engine revision and the machine you ran on with any results.
 
 ## Licence
 
 Copyright 2026 HydraDB. Licensed under the GNU Affero General Public License,
-Version 3 (SPDX: `AGPL-3.0`). The full text is in [LICENSE](LICENSE).
+Version 3 (SPDX: `AGPL-3.0`). Full text in [LICENSE](LICENSE).
 
-The same licence as [the engine](https://github.com/hydra-db/hydradb), which
-matters here because `bench/` began as the engine's `examples/query_bench.rs`
-and is therefore a derived work.
+This matches [the engine](https://github.com/hydra-db/hydradb), which matters
+because `bench/` began as the engine's `examples/query_bench.rs` and is a derived
+work of it.
