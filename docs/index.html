@@ -701,9 +701,15 @@ function writes(){
   const at=(w,k)=>D.writes.find(x=>x.fanout===st.wfanout&&x.workload===w&&x.conc===k);
   const cs=[...new Set(D.writes.filter(x=>x.fanout===st.wfanout).map(x=>x.conc))]
     .sort((a,b)=>a-b);
+  /* All three statements stay on the chart, because the comparison between them
+     is the point: delete costs noticeably more than create. The selected one is
+     drawn in full colour and the other two recede, so the selector visibly
+     drives the chart instead of only the table below it. */
   const ser=wls.map((w,i)=>{
     const v=cs.map(k=>{const r=at(w,k); return r?(st.wmode==='lat'?r.p50:r.ops):null;});
-    return v.some(x=>x==null)?null:{w,v,color:cv(['--s1','--s2','--s3'][i%3])};
+    if(v.some(x=>x==null)) return null;
+    const on=w===st.wwl;
+    return {w,v,on,color:on?cv(['--s1','--s2','--s3'][i%3]):cv('--fg3')};
   }).filter(Boolean);
   if(!ser.length) return;
 
@@ -721,21 +727,26 @@ function writes(){
   xl.textContent='concurrent writers'; svg.appendChild(xl);
 
   const tags=[];
-  ser.forEach((s,si)=>{
+  // Unselected first, so the selected line is painted over them rather than under.
+  [...ser].sort((a,b)=>(a.on?1:0)-(b.on?1:0)).forEach((s,si)=>{
     const p=mk('path',{class:'ln',d:s.v.map((x,i)=>`${i?'L':'M'}${X(i)},${Y(x)}`).join(' '),
       stroke:s.color});
+    if(!s.on){ p.setAttribute('stroke-width',1.5); p.setAttribute('opacity',.45); }
     p.style.setProperty('--l',Math.hypot(iw,ih)*1.5); p.style.transitionDelay=(si*130)+'ms';
     svg.appendChild(p);
-    s.v.forEach((x,i)=>{const d=mk('circle',{class:'fade',cx:X(i),cy:Y(x),r:4.5,fill:s.color});
+    if(s.on) s.v.forEach((x,i)=>{
+      const d=mk('circle',{class:'fade',cx:X(i),cy:Y(x),r:4.5,fill:s.color});
       d.style.transitionDelay=(si*130+620)+'ms';svg.appendChild(d);});
-    tags.push({y:Y(s.v[s.v.length-1]),text:s.w,color:s.color,d:si*130+700});
+    tags.push({y:Y(s.v[s.v.length-1]),text:s.w,color:s.color,on:s.on,d:si*130+700});
   });
   const GAP=17; tags.sort((a,b)=>a.y-b.y);
   for(let i=1;i<tags.length;i++) if(tags[i].y-tags[i-1].y<GAP) tags[i].y=tags[i-1].y+GAP;
   const over=tags.length?tags[tags.length-1].y-(T+ih):0;
   if(over>0) tags.forEach(g=>g.y-=over);
   tags.forEach(g=>{const e=mk('text',{x:L+iw+12,y:g.y+4,class:'ax fade',fill:g.color});
-    e.textContent=g.text; e.style.transitionDelay=g.d+'ms'; svg.appendChild(e);});
+    e.textContent=g.text; if(g.on) e.setAttribute('font-weight',600);
+    else e.setAttribute('opacity',.6);
+    e.style.transitionDelay=g.d+'ms'; svg.appendChild(e);});
 
   const el=$('w-query');
   if(el){ el.innerHTML='<span>'+esc(WQUERY[st.wwl])+'</span>'; el.title=WQUERY[st.wwl]; }
