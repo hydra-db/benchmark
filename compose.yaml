@@ -1,0 +1,122 @@
+name: turbolay-falkor-bench
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "127.0.0.1:${MINIO_HOST_PORT:-19000}:9000"
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_BUCKET: turbolay-bench
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        until mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"; do
+          sleep 1
+        done
+        mc mb --ignore-existing "local/$${MINIO_BUCKET}"
+
+  turbolay:
+    build:
+      context: ../turbolay
+      dockerfile: Dockerfile
+      target: runtime
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      CLOUD_PROVIDER: aws
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT: http://minio:9000
+      AWS_BUCKET: turbolay-bench
+      AWS_ALLOW_HTTP: "true"
+      AWS_VIRTUAL_HOSTED_STYLE_REQUEST: "false"
+      GRAPH_NAMESPACE: benchmark
+      GRAPH_ID: benchmark
+      GRAPH_DATABASE: benchmark
+      GRAPH_CELL_ID: cell-0
+      GRAPH_CELLS: cell-0
+      GRAPH_DATA_PATH: benchmark/${RUN_ID:-local}
+      GRAPH_DATA_CACHE_DIR: /var/cache/slatedb/data
+      GRAPH_DATA_CACHE_BYTES: "268435456"
+      GRAPH_NODE_ID: turbolay-0
+      GRAPH_BOLT_ADDR: 0.0.0.0:7687
+      GRAPH_ADVERTISED_BOLT_ADDR: turbolay:7687
+      GRAPH_BOLT_NODE_ADDRESSES: turbolay-0=turbolay:7687
+      GRAPH_HTTP_ADDR: 0.0.0.0:8443
+      GRAPH_ADMIN_ADDR: 0.0.0.0:9090
+      GRAPH_AUTH_TOKEN_FILE: /run/turbolay/auth-token
+      GRAPH_ALLOW_PLAINTEXT: "true"
+      GRAPH_MAX_QUERY_SCAN_EDGES: "1000000"
+      GRAPH_MAX_QUERY_RUNTIME_MS: "30000"
+      RUST_MIN_STACK: "33554432"
+      RUST_LOG: info
+    ports:
+      - "127.0.0.1:${TURBOLAY_BOLT_HOST_PORT:-17687}:7687"
+      - "127.0.0.1:${TURBOLAY_HTTP_HOST_PORT:-18443}:8443"
+      - "127.0.0.1:${TURBOLAY_ADMIN_HOST_PORT:-19091}:9090"
+    volumes:
+      - ./compose/auth-token:/run/turbolay/auth-token:ro
+
+  falkor:
+    image: falkordb/falkordb:v4.20.2
+    ports:
+      - "127.0.0.1:${FALKOR_HOST_PORT:-16379}:6379"
+
+  verify:
+    build:
+      context: .
+      dockerfile: docker/runner.Dockerfile
+    depends_on:
+      - turbolay
+      - falkor
+    environment: &runner-env
+      TURBOLAY_BOLT_URI: bolt://turbolay:7687
+      TURBOLAY_DATABASE: benchmark
+      TURBOLAY_PRINCIPAL: neo4j
+      TURBOLAY_TOKEN: benchmark-local-auth-token-32chars
+      FALKOR_HOST: falkor
+      FALKOR_PORT: "6379"
+      FALKOR_GRAPH: benchmark
+      BENCH_RUN_ID: ${RUN_ID:-local}
+      BENCH_ARTIFACT_DIR: /artifacts/${RUN_ID:-local}
+      BENCH_FANOUT: ${BENCH_FANOUT:-10}
+      BENCH_HOPS: ${BENCH_HOPS:-3}
+      BENCH_PAGE_SIZE: ${BENCH_PAGE_SIZE:-5}
+      BENCH_CONNECT_TIMEOUT_S: ${BENCH_CONNECT_TIMEOUT_S:-120}
+    command: ["verify"]
+    volumes:
+      - ./artifacts:/artifacts
+
+  bench:
+    build:
+      context: .
+      dockerfile: docker/runner.Dockerfile
+    depends_on:
+      - turbolay
+      - falkor
+    environment:
+      <<: *runner-env
+      BENCH_EXECUTION_MODE: ${BENCH_EXECUTION_MODE:-isolated}
+      BENCH_LATENCY_SAMPLES: ${BENCH_LATENCY_SAMPLES:-20}
+      BENCH_CONCURRENCY: ${BENCH_CONCURRENCY:-4}
+    command: ["bench"]
+    volumes:
+      - ./artifacts:/artifacts
+
+volumes:
+  minio-data:

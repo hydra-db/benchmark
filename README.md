@@ -74,6 +74,45 @@ HYDRADB_SRC=~/hydradb ./scripts/collect-minio.sh
 The engine revision used is recorded in the dataset as `meta.engine_rev`, so any
 published figure can be traced back to the build that produced it.
 
+## Docker/Bolt comparison: Turbolay versus FalkorDB
+
+`compose.yaml` runs both databases at once: Turbolay persists to a local MinIO
+container and FalkorDB is pinned to `falkordb/falkordb:v4.20.2`. The runner
+seeds an equivalent fixture into both engines, executes each paired correctness
+operation concurrently, compares rows against each other and against the
+synthetic graph's expected result, then writes reports. The seed adapter keeps
+the graph identical despite the two engines' different `MERGE` node-identity
+semantics; all tested reads and writes use the same portable Cypher. Turbolay
+uses Bolt; FalkorDB 4.20.2 uses its native RESP `GRAPH.QUERY` protocol (it does
+not expose a Bolt listener).
+
+```bash
+# Fresh stack, seed both backends, execute paired read/write checks, compare.
+./scripts/run-compose-bench.sh verify
+
+# The same correctness gate, followed by Bolt latency measurement.
+./scripts/run-compose-bench.sh bench
+
+# Optional co-located contention measurement; do not compare it with isolated
+# latency because both engines share the host at the same instant.
+BENCH_EXECUTION_MODE=parallel ./scripts/run-compose-bench.sh bench
+```
+
+Every invocation uses a generated Compose project and `RUN_ID`, then removes
+its containers and MinIO volume. Results remain at
+`artifacts/<run-id>/`:
+
+| File | Contents |
+|---|---|
+| `correctness.jsonl` | Every paired statement, parameters, expected result, both result sets, and timing |
+| `comparison.csv` | Per-backend p50/p95/p99/QPS for a successful latency run |
+| `summary.json` | Run configuration and final correctness status |
+
+The runner uses `bolt://turbolay:7687` and `falkor:6379` on the internal
+Compose network. For manual debugging only, Docker exposes Turbolay Bolt on
+`127.0.0.1:17687` and FalkorDB RESP on `127.0.0.1:16379`; the two services run
+concurrently without a port conflict.
+
 ## Layout
 
 | Path | |

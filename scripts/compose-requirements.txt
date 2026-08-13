@@ -1,0 +1,6 @@
+neo4j>=6,<7
+falkordb==1.6.2
+pydantic-settings>=2.10,<3
+# FalkorDB Python 1.6.2 calls redis-py's synchronous cluster probe with an
+# option Redis 8 removed. Keep its supported Redis 7 transport explicitly.
+redis>=7.1,<8
