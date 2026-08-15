@@ -1088,6 +1088,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hydradb-placement"
+version = "0.1.0"
+source = "git+https://github.com/hydra-db/hydradb.git?branch=main#6a2fbb192f37f51a93690a2ae2d2f5e27e6e4219"
+dependencies = [
+ "chrono",
+ "futures",
+ "serde",
+ "serde_json",
+ "slatedb",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "hyper"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2488,18 +2501,19 @@ dependencies = [
 [[package]]
 name = "slatedb-graph-kernel"
 version = "0.1.0"
+source = "git+https://github.com/hydra-db/hydradb.git?branch=main#6a2fbb192f37f51a93690a2ae2d2f5e27e6e4219"
 dependencies = [
  "async-trait",
  "bytes",
  "chrono",
  "futures",
+ "hydradb-placement",
  "libcypher-parser-sys",
  "sha2",
  "slatedb",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
- "turbolay-placement",
  "ulid",
 ]
 
@@ -2913,18 +2927,6 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
-
-[[package]]
-name = "turbolay-placement"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "futures",
- "serde",
- "serde_json",
- "slatedb",
- "thiserror 2.0.20",
-]
 
 [[package]]
 name = "twox-hash"

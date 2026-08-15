@@ -1,6 +1,14 @@
 name: turbolay-falkor-bench
 
 services:
+  jaeger:
+    image: jaegertracing/jaeger:latest
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:${JAEGER_UI_PORT:-16686}:16686"
+      - "127.0.0.1:${JAEGER_OTLP_PORT:-4318}:4318"
+
   minio:
     image: minio/minio:RELEASE.2025-07-23T15-54-02Z
     command: server /data --console-address :9001
@@ -34,9 +42,13 @@ services:
       dockerfile: Dockerfile
       target: runtime
     depends_on:
+      jaeger:
+        condition: service_started
       minio-init:
         condition: service_completed_successfully
     environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_TRACES_SAMPLER_ARG: "1.0"
       CLOUD_PROVIDER: aws
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin

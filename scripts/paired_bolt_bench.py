@@ -488,6 +488,84 @@ class Harness:
                 status="ok",
             )
 
+    async def write_latency(self) -> None:
+        create_q = f"CREATE (a {{id: $src}})-[:{WRITE_EDGE_TYPE}]->(b {{id: $dst}})"
+        merge_q = f"MERGE (a {{id: $src}})-[:{MERGE_EDGE_TYPE}]->(b {{id: $dst}})"
+        delete_q = f"MATCH (a {{id: $src}})-[e:{WRITE_EDGE_TYPE}]->(b {{id: $dst}}) DELETE e"
+        count_write = (
+            f"MATCH (a {{id: $src}})-[:{WRITE_EDGE_TYPE}]->(b {{id: $dst}}) "
+            "RETURN count(*) AS total"
+        )
+        count_merge = (
+            f"MATCH (a {{id: $src}})-[:{MERGE_EDGE_TYPE}]->(b {{id: $dst}}) "
+            "RETURN count(*) AS total"
+        )
+
+        durations: dict[str, list[int]] = {name: [] for name in self.clients}
+        started = time.perf_counter_ns()
+
+        async def write_cycle(backend: str, cycle_id: int) -> None:
+            client = self.clients[backend]
+            base = 80_000_000 + cycle_id * 10
+            c_src, c_dst = base + 1, base + 2
+            m_src, m_dst = base + 3, base + 4
+
+            ops: list[tuple[str, dict[str, Any], str, dict[str, Any], list[dict[str, Any]]]] = [
+                (create_q, {"src": c_src, "dst": c_dst}, count_write, {"src": c_src, "dst": c_dst}, [{"total": 1}]),
+                (merge_q, {"src": m_src, "dst": m_dst}, count_merge, {"src": m_src, "dst": m_dst}, [{"total": 1}]),
+                (merge_q, {"src": m_src, "dst": m_dst}, count_merge, {"src": m_src, "dst": m_dst}, [{"total": 1}]),
+                (delete_q, {"src": c_src, "dst": c_dst}, count_write, {"src": c_src, "dst": c_dst}, [{"total": 0}]),
+            ]
+            for write_query, write_params, verify_query, verify_params, expected in ops:
+                _, dur = await client.run(write_query, write_params)
+                durations[backend].append(dur)
+                rows, _ = await client.run(verify_query, verify_params)
+                if rows != expected:
+                    raise RuntimeError(
+                        f"write verification failed for {backend}: "
+                        f"query={write_query}, got {rows}, expected {expected}"
+                    )
+                self.checks += 1
+
+        batches = math.ceil(self.samples / self.concurrency)
+        for batch in range(batches):
+            remaining = min(self.concurrency, self.samples - batch * self.concurrency)
+            if self.mode == "parallel":
+                await asyncio.gather(*(
+                    write_cycle(backend, batch * self.concurrency + i)
+                    for i in range(remaining)
+                    for backend in self.clients
+                ))
+            else:
+                order = ("turbolay", "falkor") if batch % 2 == 0 else ("falkor", "turbolay")
+                for backend in order:
+                    await asyncio.gather(*(
+                        write_cycle(backend, batch * self.concurrency + i)
+                        for i in range(remaining)
+                    ))
+        elapsed_ns = time.perf_counter_ns() - started
+
+        for backend, values in durations.items():
+            micros = [value / 1_000 for value in values]
+            qps = len(values) / max(elapsed_ns / 1_000_000_000, sys.float_info.min)
+            self.report.row(
+                run_id=self.run_id,
+                phase="latency",
+                test="write-mixed",
+                backend=backend,
+                execution_mode=self.mode,
+                fanout=self.fanout,
+                hops=self.hops,
+                concurrency=self.concurrency,
+                samples=len(values),
+                p50_us=f"{percentile(micros, 50):.3f}",
+                p95_us=f"{percentile(micros, 95):.3f}",
+                p99_us=f"{percentile(micros, 99):.3f}",
+                mean_us=f"{statistics.fmean(micros):.3f}",
+                qps=f"{qps:.3f}",
+                status="ok",
+            )
+
     async def run(self, command: str) -> None:
         await asyncio.gather(
             *(client.wait_ready(self.config.connect_timeout_s) for client in self.clients.values())
@@ -495,6 +573,7 @@ class Harness:
         await self.verify()
         if command == "bench":
             await self.latency()
+            await self.write_latency()
         self.report.summary(
             {
                 "run_id": self.run_id,
