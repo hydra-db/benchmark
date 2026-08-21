@@ -31,6 +31,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 EDGE_TYPE = "BENCH_LINK"
 WRITE_EDGE_TYPE = "WRITE_LINK"
 MERGE_EDGE_TYPE = "MERGE_LINK"
+CONFLICT_EDGE_TYPE = "CONFLICT_LINK"
+CONFLICT_FAN = 5
 
 
 class HarnessConfig(BaseSettings):
@@ -424,6 +426,56 @@ class Harness:
         await self.paired("correctness", "delete", delete, {"src": write_src, "dst": write_dst}, [])
         await self.paired("correctness", "delete-not-visible", write_count, {"src": write_src, "dst": write_dst}, [{"total": 0}])
 
+        # Conflicting concurrent writes: 5 edges fan out from the same source.
+        conflict_src = 95_000_001
+        conflict_dsts = [95_000_002 + i for i in range(CONFLICT_FAN)]
+        conflict_create = f"CREATE (a {{id: $src}})-[:{CONFLICT_EDGE_TYPE}]->(b {{id: $dst}})"
+        conflict_count = (
+            f"MATCH (a {{id: $src}})-[:{CONFLICT_EDGE_TYPE}]->(b {{id: $dst}}) "
+            "RETURN count(*) AS total"
+        )
+        conflict_delete = (
+            f"MATCH (a {{id: $src}})-[e:{CONFLICT_EDGE_TYPE}]->(b {{id: $dst}}) DELETE e"
+        )
+
+        await asyncio.gather(*(
+            self.paired(
+                "correctness",
+                f"conflict-create-{conflict_src}-{dst}",
+                conflict_create,
+                {"src": conflict_src, "dst": dst},
+                [],
+            )
+            for dst in conflict_dsts
+        ))
+        for dst in conflict_dsts:
+            await self.paired(
+                "correctness",
+                f"conflict-create-visible-{conflict_src}-{dst}",
+                conflict_count,
+                {"src": conflict_src, "dst": dst},
+                [{"total": 1}],
+            )
+
+        await asyncio.gather(*(
+            self.paired(
+                "correctness",
+                f"conflict-delete-{conflict_src}-{dst}",
+                conflict_delete,
+                {"src": conflict_src, "dst": dst},
+                [],
+            )
+            for dst in conflict_dsts
+        ))
+        for dst in conflict_dsts:
+            await self.paired(
+                "correctness",
+                f"conflict-delete-not-visible-{conflict_src}-{dst}",
+                conflict_count,
+                {"src": conflict_src, "dst": dst},
+                [{"total": 0}],
+            )
+
     async def measure_query(
         self, client: QueryClient, query: str
     ) -> tuple[int, list[dict[str, Any]]]:
@@ -566,6 +618,94 @@ class Harness:
                 status="ok",
             )
 
+    async def conflict_write_latency(self) -> None:
+        create_q = f"CREATE (a {{id: $src}})-[:{CONFLICT_EDGE_TYPE}]->(b {{id: $dst}})"
+        delete_q = f"MATCH (a {{id: $src}})-[e:{CONFLICT_EDGE_TYPE}]->(b {{id: $dst}}) DELETE e"
+        count_q = (
+            f"MATCH (a {{id: $src}})-[:{CONFLICT_EDGE_TYPE}]->(b {{id: $dst}}) "
+            "RETURN count(*) AS total"
+        )
+
+        durations: dict[str, list[int]] = {name: [] for name in self.clients}
+        started = time.perf_counter_ns()
+
+        async def conflict_cycle(backend: str, cycle_id: int) -> None:
+            client = self.clients[backend]
+            base = 70_000_000 + cycle_id * 100
+            src = base + 1
+            dsts = [base + 2 + i for i in range(CONFLICT_FAN)]
+
+            # Concurrent creates from the same source node.
+            results = await asyncio.gather(*(
+                client.run(create_q, {"src": src, "dst": dst})
+                for dst in dsts
+            ))
+            for _, dur in results:
+                durations[backend].append(dur)
+
+            # Verify all edges exist.
+            for dst in dsts:
+                rows, _ = await client.run(count_q, {"src": src, "dst": dst})
+                if rows != [{"total": 1}]:
+                    raise RuntimeError(
+                        f"conflict-write verification failed for {backend}: "
+                        f"create ({src})->{dst}, got {rows}"
+                    )
+                self.checks += 1
+
+            # Concurrent deletes of the same fan.
+            results = await asyncio.gather(*(
+                client.run(delete_q, {"src": src, "dst": dst})
+                for dst in dsts
+            ))
+            for _, dur in results:
+                durations[backend].append(dur)
+
+            # Verify all edges gone.
+            for dst in dsts:
+                rows, _ = await client.run(count_q, {"src": src, "dst": dst})
+                if rows != [{"total": 0}]:
+                    raise RuntimeError(
+                        f"conflict-write verification failed for {backend}: "
+                        f"delete ({src})->{dst}, got {rows}"
+                    )
+                self.checks += 1
+
+        # Each cycle already fires CONFLICT_FAN concurrent queries, so run
+        # cycles sequentially to avoid exhausting the connection pool.
+        for cycle_id in range(self.samples):
+            if self.mode == "parallel":
+                await asyncio.gather(*(
+                    conflict_cycle(backend, cycle_id)
+                    for backend in self.clients
+                ))
+            else:
+                order = ("turbolay", "falkor") if cycle_id % 2 == 0 else ("falkor", "turbolay")
+                for backend in order:
+                    await conflict_cycle(backend, cycle_id)
+        elapsed_ns = time.perf_counter_ns() - started
+
+        for backend, values in durations.items():
+            micros = [value / 1_000 for value in values]
+            qps = len(values) / max(elapsed_ns / 1_000_000_000, sys.float_info.min)
+            self.report.row(
+                run_id=self.run_id,
+                phase="latency",
+                test="conflict-write",
+                backend=backend,
+                execution_mode=self.mode,
+                fanout=self.fanout,
+                hops=self.hops,
+                concurrency=self.concurrency,
+                samples=len(values),
+                p50_us=f"{percentile(micros, 50):.3f}",
+                p95_us=f"{percentile(micros, 95):.3f}",
+                p99_us=f"{percentile(micros, 99):.3f}",
+                mean_us=f"{statistics.fmean(micros):.3f}",
+                qps=f"{qps:.3f}",
+                status="ok",
+            )
+
     async def run(self, command: str) -> None:
         await asyncio.gather(
             *(client.wait_ready(self.config.connect_timeout_s) for client in self.clients.values())
@@ -574,6 +714,7 @@ class Harness:
         if command == "bench":
             await self.latency()
             await self.write_latency()
+            await self.conflict_write_latency()
         self.report.summary(
             {
                 "run_id": self.run_id,
